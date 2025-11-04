@@ -1,0 +1,931 @@
+1 — File: composer.json
+(Use the default composer.json created by composer create-project laravel/laravel pms — no change required here.)
+
+2 — Migrations
+Create these migrations (php artisan make:migration ... or paste into database/migrations/*).
+database/migrations/2025_01_01_000001_create_projects_table.php
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration {
+    public function up(): void {
+        Schema::create('projects', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->onDelete('cascade'); // owner
+            $table->string('title');
+            $table->text('description')->nullable();
+            $table->date('start_date')->nullable();
+            $table->date('end_date')->nullable();
+            $table->enum('visibility',['private','public'])->default('private');
+            $table->timestamps();
+        });
+    }
+    public function down(): void {
+        Schema::dropIfExists('projects');
+    }
+};
+
+database/migrations/2025_01_01_000002_create_tasks_table.php
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration {
+    public function up(): void {
+        Schema::create('tasks', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('project_id')->constrained()->onDelete('cascade');
+            $table->foreignId('assigned_to')->nullable()->constrained('users')->nullOnDelete();
+            $table->string('title');
+            $table->text('description')->nullable();
+            $table->enum('status',['todo','inprogress','completed'])->default('todo');
+            $table->date('due_date')->nullable();
+            $table->timestamps();
+        });
+    }
+    public function down(): void {
+        Schema::dropIfExists('tasks');
+    }
+};
+
+database/migrations/2025_01_01_000003_create_comments_table.php
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration {
+    public function up(): void {
+        Schema::create('comments', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->onDelete('cascade');
+            $table->foreignId('project_id')->nullable()->constrained()->nullOnDelete();
+            $table->foreignId('task_id')->nullable()->constrained()->nullOnDelete();
+            $table->text('content');
+            $table->timestamps();
+        });
+    }
+    public function down(): void {
+        Schema::dropIfExists('comments');
+    }
+};
+
+database/migrations/2025_01_01_000004_create_activity_logs_table.php
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration {
+    public function up(): void {
+        Schema::create('activity_logs', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->onDelete('cascade');
+            $table->string('action');
+            $table->json('data')->nullable();
+            $table->timestamps();
+        });
+    }
+    public function down(): void {
+        Schema::dropIfExists('activity_logs');
+    }
+};
+
+
+3 — Models
+app/Models/Project.php
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Project extends Model {
+    use HasFactory;
+    protected $fillable = ['user_id','title','description','start_date','end_date','visibility'];
+
+    public function user(){ return $this->belongsTo(User::class); }
+    public function tasks(){ return $this->hasMany(Task::class); }
+    public function comments(){ return $this->hasMany(Comment::class); }
+}
+
+app/Models/Task.php
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Task extends Model {
+    use HasFactory;
+    protected $fillable = ['project_id','assigned_to','title','description','status','due_date'];
+
+    public function project(){ return $this->belongsTo(Project::class); }
+    public function assignee(){ return $this->belongsTo(User::class,'assigned_to'); }
+    public function comments(){ return $this->hasMany(Comment::class); }
+}
+
+app/Models/Comment.php
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Comment extends Model {
+    use HasFactory;
+    protected $fillable = ['user_id','project_id','task_id','content'];
+    public function user(){ return $this->belongsTo(User::class); }
+}
+
+app/Models/ActivityLog.php
+<?php
+namespace App\Models;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class ActivityLog extends Model {
+    use HasFactory;
+    protected $fillable = ['user_id','action','data'];
+    protected $casts = ['data' => 'array'];
+    public function user(){ return $this->belongsTo(User::class); }
+}
+
+
+4 — Helper
+Create app/Helpers/activity.php and register it in composer.json autoload files.
+app/Helpers/activity.php
+<?php
+use App\Models\ActivityLog;
+
+if (! function_exists('logActivity')) {
+    function logActivity(string $action, array|null $data = null) {
+        ActivityLog::create([
+            'user_id' => auth()->id() ?? null,
+            'action' => $action,
+            'data' => $data,
+        ]);
+    }
+}
+
+Add to composer.json under autoload.files:
+"files": [
+    "app/Helpers/activity.php"
+]
+
+Then run:
+composer dump-autoload
+
+Note: auth()->id() may be null when running seeder as non-auth — adjust use in seeders.
+
+5 — Controllers
+app/Http/Controllers/AuthController.php
+<?php
+namespace App\Http\Controllers;
+use Illuminate\Http\Request;
+use App\Models\User;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
+
+class AuthController extends Controller {
+    public function showRegister(){ return view('auth.register'); }
+    public function showLogin(){ return view('auth.login'); }
+
+    public function register(Request $r){
+        $r->validate([
+            'name'=>'required',
+            'email'=>'required|email|unique:users,email',
+            'password'=>'required|confirmed|min:4'
+        ]);
+        $user = User::create([
+            'name'=>$r->name,
+            'email'=>$r->email,
+            'password'=>Hash::make($r->password)
+        ]);
+        Auth::login($user);
+        logActivity('User registered', ['user_id'=>$user->id, 'email'=>$user->email]);
+        return redirect()->route('dashboard');
+    }
+
+    public function login(Request $r){
+        $credentials = $r->validate(['email'=>'required|email','password'=>'required']);
+        if (Auth::attempt($credentials)) {
+            $r->session()->regenerate();
+            logActivity('User logged in', ['user_id'=>auth()->id()]);
+            return redirect()->route('dashboard');
+        }
+        return back()->withErrors(['email'=>'Invalid credentials'])->onlyInput('email');
+    }
+
+    public function logout(Request $r){
+        logActivity('User logged out', ['user_id'=>auth()->id()]);
+        Auth::logout();
+        $r->session()->invalidate();
+        $r->session()->regenerateToken();
+        return redirect()->route('login');
+    }
+}
+
+app/Http/Controllers/DashboardController.php
+<?php
+namespace App\Http\Controllers;
+use App\Models\Project;
+use App\Models\Task;
+use App\Models\ActivityLog;
+use App\Models\Comment;
+
+class DashboardController extends Controller {
+    public function index(){
+        $userId = auth()->id();
+        $projects = Project::where('user_id',$userId)->count();
+        $tasks = Task::count();
+        $todo = Task::where('status','todo')->count();
+        $inprogress = Task::where('status','inprogress')->count();
+        $completed = Task::where('status','completed')->count();
+        $logs = ActivityLog::latest()->take(10)->get();
+        $comments = Comment::latest()->take(20)->get(); // public comments
+        return view('dashboard', compact('projects','tasks','todo','inprogress','completed','logs','comments'));
+    }
+}
+
+app/Http/Controllers/ProjectController.php
+<?php
+namespace App\Http\Controllers;
+use Illuminate\Http\Request;
+use App\Models\Project;
+use App\Models\User;
+
+class ProjectController extends Controller {
+    public function index(Request $r){
+        $q = Project::query();
+        if ($r->filled('search')) $q->where('title','like','%'.$r->search.'%');
+        $projects = $q->where('user_id', auth()->id())->latest()->get();
+        return view('projects.index', compact('projects'));
+    }
+
+    public function create(){ return view('projects.create'); }
+
+    public function store(Request $r){
+        $data = $r->validate(['title'=>'required','description'=>'nullable','start_date'=>'nullable|date','end_date'=>'nullable|date','visibility'=>'in:private,public']);
+        $data['user_id'] = auth()->id();
+        $project = Project::create($data);
+        logActivity('Created project', ['project_id'=>$project->id,'title'=>$project->title]);
+        return redirect()->route('projects.index')->with('success','Project created.');
+    }
+
+    public function show(Project $project){
+        $this->authorizeView($project);
+        $project->load('tasks','comments');
+        return view('projects.show', compact('project'));
+    }
+
+    public function edit(Project $project){
+        $this->authorizeView($project);
+        return view('projects.edit', compact('project'));
+    }
+
+    public function update(Request $r, Project $project){
+        $this->authorizeView($project);
+        $data = $r->validate(['title'=>'required','description'=>'nullable','start_date'=>'nullable|date','end_date'=>'nullable|date','visibility'=>'in:private,public']);
+        $old = $project->getOriginal();
+        $project->update($data);
+        logActivity('Updated project', ['project_id'=>$project->id,'old'=>$old,'new'=>$project->toArray()]);
+        return redirect()->route('projects.show',$project)->with('success','Project updated.');
+    }
+
+    public function destroy(Project $project){
+        $this->authorizeView($project);
+        logActivity('Deleted project', ['project_id'=>$project->id,'title'=>$project->title]);
+        $project->delete();
+        return redirect()->route('projects.index')->with('success','Project deleted.');
+    }
+
+    protected function authorizeView(Project $project){
+        if ($project->user_id !== auth()->id()) abort(403);
+    }
+}
+
+app/Http/Controllers/TaskController.php
+<?php
+namespace App\Http\Controllers;
+use Illuminate\Http\Request;
+use App\Models\Task;
+use App\Models\Project;
+use App\Models\User;
+
+class TaskController extends Controller {
+    public function index(){ // show all tasks or you can filter
+        $tasks = Task::with('project','assignee')->latest()->get();
+        return view('tasks.index', compact('tasks'));
+    }
+
+    public function create(){
+        $projects = Project::where('user_id', auth()->id())->get();
+        $users = User::all();
+        return view('tasks.create', compact('projects','users'));
+    }
+
+    public function store(Request $r){
+        $data = $r->validate(['project_id'=>'required|exists:projects,id','assigned_to'=>'nullable|exists:users,id','title'=>'required','description'=>'nullable','status'=>'in:todo,inprogress,completed','due_date'=>'nullable|date']);
+        $task = Task::create($data);
+        logActivity('Created task', ['task_id'=>$task->id,'title'=>$task->title,'project_id'=>$task->project_id]);
+        return redirect()->route('projects.show',$task->project_id)->with('success','Task created.');
+    }
+
+    public function edit(Task $task){
+        $projects = Project::where('user_id', auth()->id())->get();
+        $users = User::all();
+        return view('tasks.edit', compact('task','projects','users'));
+    }
+
+    public function update(Request $r, Task $task){
+        $data = $r->validate(['project_id'=>'required|exists:projects,id','assigned_to'=>'nullable|exists:users,id','title'=>'required','description'=>'nullable','status'=>'in:todo,inprogress,completed','due_date'=>'nullable|date']);
+        $old = $task->getOriginal();
+        $task->update($data);
+        logActivity('Updated task', ['task_id'=>$task->id,'old'=>$old,'new'=>$task->toArray()]);
+        return redirect()->route('projects.show',$task->project_id)->with('success','Task updated.');
+    }
+
+    public function destroy(Task $task){
+        logActivity('Deleted task', ['task_id'=>$task->id,'title'=>$task->title,'project_id'=>$task->project_id]);
+        $task->delete();
+        return back()->with('success','Task deleted.');
+    }
+
+    // AJAX endpoint for status update
+    public function updateStatus(Request $r, Task $task){
+        $r->validate(['status'=>'required|in:todo,inprogress,completed']);
+        $old = $task->status;
+        $task->update(['status'=>$r->status]);
+        logActivity('Changed task status', ['task_id'=>$task->id,'from'=>$old,'to'=>$r->status]);
+        return response()->json(['success'=>true,'status'=>$task->status]);
+    }
+}
+
+app/Http/Controllers/CommentController.php
+<?php
+namespace App\Http\Controllers;
+use Illuminate\Http\Request;
+use App\Models\Comment;
+
+class CommentController extends Controller {
+    // Store comment (AJAX or regular)
+    public function store(Request $r){
+        $data = $r->validate([
+            'project_id'=>'nullable|exists:projects,id',
+            'task_id'=>'nullable|exists:tasks,id',
+            'content'=>'required|string'
+        ]);
+        $data['user_id'] = auth()->id();
+        $comment = Comment::create($data);
+        logActivity('Added comment', ['comment_id'=>$comment->id,'on'=>$data['task_id'] ? 'task' : 'project','content'=>substr($comment->content,0,200)]);
+        if ($r->expectsJson() || $r->ajax()) {
+            return response()->json([
+                'id'=>$comment->id,
+                'user'=> $comment->user->name,
+                'content'=>$comment->content,
+                'created_at'=>$comment->created_at->diffForHumans()
+            ]);
+        }
+        return back()->with('success','Comment added.');
+    }
+}
+
+app/Http/Controllers/ActivityLogController.php
+<?php
+namespace App\Http\Controllers;
+use App\Models\ActivityLog;
+use Illuminate\Http\Request;
+
+class ActivityLogController extends Controller {
+    public function index(Request $r){
+        $q = ActivityLog::query();
+        if ($r->filled('search')) $q->where('action','like','%'.$r->search.'%');
+        $logs = $q->latest()->paginate(15);
+        return view('activity.index', compact('logs'));
+    }
+}
+
+
+6 — Routes (routes/web.php)
+Replace or extend your web.php with:
+<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\{
+    AuthController, DashboardController, ProjectController, TaskController, CommentController, ActivityLogController
+};
+
+Route::get('/', fn() => redirect()->route('login'));
+
+// Auth
+Route::get('/register',[AuthController::class,'showRegister'])->name('register');
+Route::post('/register',[AuthController::class,'register']);
+Route::get('/login',[AuthController::class,'showLogin'])->name('login');
+Route::post('/login',[AuthController::class,'login']);
+Route::post('/logout',[AuthController::class,'logout'])->name('logout');
+
+// Protected routes
+Route::middleware('auth')->group(function(){
+    Route::get('/dashboard',[DashboardController::class,'index'])->name('dashboard');
+
+    Route::resource('projects', ProjectController::class);
+    Route::resource('tasks', TaskController::class)->except(['show','create','store']); // we'll add create/store manually
+    // For task create/store we used dedicated routes in controller but we left resource for edit/update/destroy
+
+    // If you want full task resource (use these instead):
+    Route::get('/tasks',[TaskController::class,'index'])->name('tasks.index');
+    Route::get('/tasks/create',[TaskController::class,'create'])->name('tasks.create');
+    Route::post('/tasks',[TaskController::class,'store'])->name('tasks.store');
+    Route::get('/tasks/{task}/edit',[TaskController::class,'edit'])->name('tasks.edit');
+    Route::put('/tasks/{task}',[TaskController::class,'update'])->name('tasks.update');
+    Route::delete('/tasks/{task}',[TaskController::class,'destroy'])->name('tasks.destroy');
+
+    // AJAX endpoints
+    Route::post('/tasks/{task}/status',[TaskController::class,'updateStatus'])->name('tasks.status');
+
+    // Comments
+    Route::post('/comment',[CommentController::class,'store'])->name('comment.store');
+
+    // Activity logs
+    Route::get('/activity',[ActivityLogController::class,'index'])->name('activity.index');
+});
+
+
+7 — Blade Views (no CSS, layout extend)
+Create the following views under resources/views/...
+resources/views/layouts/app.blade.php
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PMS Mini</title>
+</head>
+<body>
+    <nav>
+        @auth
+            <a href="{{ route('dashboard') }}">Dashboard</a> |
+            <a href="{{ route('projects.index') }}">Projects</a> |
+            <a href="{{ route('tasks.index') }}">Tasks</a> |
+            <a href="{{ route('activity.index') }}">Activity</a> |
+            <form method="POST" action="{{ route('logout') }}" style="display:inline;">
+                @csrf
+                <button type="submit">Logout</button>
+            </form>
+            <span> | {{ auth()->user()->name }}</span>
+        @else
+            <a href="{{ route('login') }}">Login</a> |
+            <a href="{{ route('register') }}">Register</a>
+        @endauth
+    </nav>
+    <hr>
+    <div>
+        @if(session('success')) <div style="color:green">{{ session('success') }}</div> @endif
+        @if($errors->any()) <div style="color:red"><ul>@foreach($errors->all() as $e)<li>{{ $e }}</li>@endforeach</ul></div>@endif
+        @yield('content')
+    </div>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    @stack('scripts')
+</body>
+</html>
+
+
+Auth views
+resources/views/auth/register.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Register</h2>
+<form method="POST" action="{{ route('register') }}">
+    @csrf
+    <div><label>Name</label><br><input name="name" value="{{ old('name') }}"></div>
+    <div><label>Email</label><br><input name="email" value="{{ old('email') }}"></div>
+    <div><label>Password</label><br><input type="password" name="password"></div>
+    <div><label>Confirm Password</label><br><input type="password" name="password_confirmation"></div>
+    <div><button type="submit">Register</button></div>
+</form>
+@endsection
+
+resources/views/auth/login.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Login</h2>
+<form method="POST" action="{{ route('login') }}">
+    @csrf
+    <div><label>Email</label><br><input name="email" value="{{ old('email') }}"></div>
+    <div><label>Password</label><br><input type="password" name="password"></div>
+    <div><button type="submit">Login</button></div>
+</form>
+@endsection
+
+
+resources/views/dashboard.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Dashboard</h2>
+<ul>
+    <li>Total Projects (your): {{ $projects }}</li>
+    <li>Total Tasks: {{ $tasks }}</li>
+    <li>To Do: {{ $todo }}</li>
+    <li>In Progress: {{ $inprogress }}</li>
+    <li>Completed: {{ $completed }}</li>
+</ul>
+
+<h3>Recent Activity</h3>
+<ul>
+@foreach($logs as $log)
+    <li>
+        <strong>{{ $log->action }}</strong> — <small>{{ $log->created_at->diffForHumans() }}</small>
+        @if($log->data)
+            <pre>{{ json_encode($log->data, JSON_PRETTY_PRINT) }}</pre>
+        @endif
+    </li>
+@endforeach
+</ul>
+
+<h3>Public Comments</h3>
+<ul>
+@foreach($comments as $c)
+    <li><b>{{ $c->user->name }}</b>: {{ $c->content }} — <small>{{ $c->created_at->diffForHumans() }}</small></li>
+@endforeach
+</ul>
+
+<h3>Add Public Comment</h3>
+<form id="publicCommentForm">
+    @csrf
+    <textarea name="content" id="publicCommentText" rows="3" cols="50"></textarea><br>
+    <button id="postPublicComment" type="button">Post Comment</button>
+</form>
+
+@push('scripts')
+<script>
+$('#postPublicComment').click(function(){
+    $.post('{{ route('comment.store') }}',{
+        _token: '{{ csrf_token() }}',
+        content: $('#publicCommentText').val()
+    }, function(resp){
+        if (resp.user) {
+            alert('Comment posted');
+            location.reload();
+        }
+    });
+});
+</script>
+@endpush
+
+@endsection
+
+
+Projects views
+resources/views/projects/index.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Your Projects</h2>
+<form method="GET">
+    <input name="search" value="{{ request('search') }}" placeholder="Search">
+    <button>Search</button>
+</form>
+<p><a href="{{ route('projects.create') }}">Create Project</a></p>
+<ul>
+@foreach($projects as $p)
+    <li><a href="{{ route('projects.show', $p) }}">{{ $p->title }}</a> — <a href="{{ route('projects.edit',$p) }}">Edit</a> 
+        <form action="{{ route('projects.destroy',$p) }}" method="POST" style="display:inline;">
+            @csrf @method('DELETE')
+            <button type="submit">Delete</button>
+        </form>
+    </li>
+@endforeach
+</ul>
+@endsection
+
+resources/views/projects/create.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Create Project</h2>
+<form method="POST" action="{{ route('projects.store') }}">
+    @csrf
+    <div><label>Title</label><br><input name="title" value="{{ old('title') }}"></div>
+    <div><label>Description</label><br><textarea name="description">{{ old('description') }}</textarea></div>
+    <div><label>Visibility</label><br>
+        <select name="visibility">
+            <option value="private">Private</option>
+            <option value="public">Public</option>
+        </select>
+    </div>
+    <div><button>Create</button></div>
+</form>
+@endsection
+
+resources/views/projects/edit.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Edit Project</h2>
+<form method="POST" action="{{ route('projects.update',$project) }}">
+    @csrf @method('PUT')
+    <div><label>Title</label><br><input name="title" value="{{ old('title',$project->title) }}"></div>
+    <div><label>Description</label><br><textarea name="description">{{ old('description',$project->description) }}</textarea></div>
+    <div><label>Visibility</label><br>
+        <select name="visibility">
+            <option value="private" {{ $project->visibility=='private'?'selected':'' }}>Private</option>
+            <option value="public" {{ $project->visibility=='public'?'selected':'' }}>Public</option>
+        </select>
+    </div>
+    <div><button>Update</button></div>
+</form>
+@endsection
+
+resources/views/projects/show.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>{{ $project->title }}</h2>
+<p>{{ $project->description }}</p>
+
+<h3>Tasks</h3>
+<p><a href="{{ route('tasks.create') }}">Create Task</a></p>
+<ul>
+@foreach($project->tasks as $task)
+    <li>
+        <b>{{ $task->title }}</b> — Status: 
+        <select class="task-status" data-id="{{ $task->id }}">
+            <option value="todo" {{ $task->status=='todo'?'selected':'' }}>To Do</option>
+            <option value="inprogress" {{ $task->status=='inprogress'?'selected':'' }}>In Progress</option>
+            <option value="completed" {{ $task->status=='completed'?'selected':'' }}>Completed</option>
+        </select>
+        — Assigned: {{ $task->assignee?->name ?? 'N/A' }}
+        — <a href="{{ route('tasks.edit',$task) }}">Edit</a>
+        <form action="{{ route('tasks.destroy',$task) }}" method="POST" style="display:inline;">
+            @csrf @method('DELETE')
+            <button>Delete</button>
+        </form>
+    </li>
+@endforeach
+</ul>
+
+<h3>Comments</h3>
+<div id="comments">
+@foreach($project->comments as $c)
+    <div><b>{{ $c->user->name }}</b>: {{ $c->content }} — <small>{{ $c->created_at->diffForHumans() }}</small></div>
+@endforeach
+</div>
+
+<h4>Add Comment</h4>
+<form id="projectCommentForm">
+    @csrf
+    <textarea id="commentText" rows="3" cols="50"></textarea><br>
+    <button id="postComment" type="button">Post Comment</button>
+</form>
+
+@push('scripts')
+<script>
+$('.task-status').change(function(){
+    var id = $(this).data('id');
+    var status = $(this).val();
+    $.post('/tasks/'+id+'/status', {_token:'{{ csrf_token() }}', status: status}, function(resp){
+        if (resp.success) alert('Status updated');
+    });
+});
+
+$('#postComment').click(function(){
+    $.post('{{ route('comment.store') }}', {
+        _token: '{{ csrf_token() }}',
+        project_id: '{{ $project->id }}',
+        content: $('#commentText').val()
+    }, function(resp){
+        if (resp.user) {
+            $('#comments').append('<div><b>'+resp.user+'</b>: '+resp.content+' — <small>'+resp.created_at+'</small></div>');
+            $('#commentText').val('');
+        }
+    });
+});
+</script>
+@endpush
+
+@endsection
+
+
+Tasks views
+resources/views/tasks/index.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>All Tasks</h2>
+<p><a href="{{ route('tasks.create') }}">Create Task</a></p>
+<ul>
+@foreach($tasks as $t)
+    <li>{{ $t->title }} ({{ $t->project->title ?? '—' }}) — {{ $t->status }} — Assigned: {{ $t->assignee?->name ?? 'N/A' }} — <a href="{{ route('tasks.edit',$t) }}">Edit</a></li>
+@endforeach
+</ul>
+@endsection
+
+resources/views/tasks/create.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Create Task</h2>
+<form method="POST" action="{{ route('tasks.store') }}">
+    @csrf
+    <div><label>Project</label><br>
+        <select name="project_id">
+            @foreach($projects as $p)
+                <option value="{{ $p->id }}">{{ $p->title }}</option>
+            @endforeach
+        </select>
+    </div>
+    <div><label>Title</label><br><input name="title"></div>
+    <div><label>Description</label><br><textarea name="description"></textarea></div>
+    <div><label>Assign to (user)</label><br>
+        <select name="assigned_to">
+            <option value="">--none--</option>
+            @foreach($users as $u)
+                <option value="{{ $u->id }}">{{ $u->name }}</option>
+            @endforeach
+        </select>
+    </div>
+    <div><label>Due Date</label><br><input name="due_date" type="date"></div>
+    <div><button>Create Task</button></div>
+</form>
+@endsection
+
+resources/views/tasks/edit.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Edit Task</h2>
+<form method="POST" action="{{ route('tasks.update',$task) }}">
+    @csrf @method('PUT')
+    <div><label>Project</label><br>
+        <select name="project_id">
+            @foreach($projects as $p)
+                <option value="{{ $p->id }}" {{ $p->id==$task->project_id?'selected':'' }}>{{ $p->title }}</option>
+            @endforeach
+        </select>
+    </div>
+    <div><label>Title</label><br><input name="title" value="{{ $task->title }}"></div>
+    <div><label>Description</label><br><textarea name="description">{{ $task->description }}</textarea></div>
+    <div><label>Assign to</label><br>
+        <select name="assigned_to">
+            <option value="">--none--</option>
+            @foreach($users as $u)
+                <option value="{{ $u->id }}" {{ $u->id==$task->assigned_to?'selected':'' }}>{{ $u->name }}</option>
+            @endforeach
+        </select>
+    </div>
+    <div><label>Status</label><br>
+        <select name="status">
+            <option value="todo" {{ $task->status=='todo'?'selected':'' }}>To Do</option>
+            <option value="inprogress" {{ $task->status=='inprogress'?'selected':'' }}>In Progress</option>
+            <option value="completed" {{ $task->status=='completed'?'selected':'' }}>Completed</option>
+        </select>
+    </div>
+    <div><label>Due date</label><br><input name="due_date" type="date" value="{{ $task->due_date }}"></div>
+    <div><button>Update Task</button></div>
+</form>
+@endsection
+
+
+Activity logs view
+resources/views/activity/index.blade.php
+@extends('layouts.app')
+@section('content')
+<h2>Activity Logs</h2>
+<form method="GET">
+    <input name="search" placeholder="Search action" value="{{ request('search') }}">
+    <button>Search</button>
+</form>
+@foreach($logs as $log)
+    <div style="border-bottom:1px solid #ddd;padding:6px 0;">
+        <b>{{ $log->action }}</b> — <small>{{ $log->created_at->diffForHumans() }}</small>
+        @if($log->data)
+            <pre>{{ json_encode($log->data, JSON_PRETTY_PRINT) }}</pre>
+        @endif
+    </div>
+@endforeach
+
+{{ $logs->links() }}
+@endsection
+
+
+8 — Seeder
+database/seeders/DatabaseSeeder.php
+<?php
+namespace Database\Seeders;
+use Illuminate\Database\Seeder;
+use App\Models\User;
+use App\Models\Project;
+use App\Models\Task;
+use App\Models\Comment;
+use App\Models\ActivityLog;
+use Illuminate\Support\Facades\Hash;
+
+class DatabaseSeeder extends Seeder {
+    public function run(): void {
+        // Create demo user
+        $user = User::factory()->create([
+            'name'=>'Demo User',
+            'email'=>'demo@pms.test',
+            'password'=>Hash::make('password')
+        ]);
+
+        // Make a couple more users
+        $u2 = User::factory()->create(['name'=>'Alice','email'=>'alice@pms.test','password'=>Hash::make('password')]);
+        $u3 = User::factory()->create(['name'=>'Bob','email'=>'bob@pms.test','password'=>Hash::make('password')]);
+
+        // Projects
+        $p = Project::create([
+            'user_id'=>$user->id,
+            'title'=>'Demo Project',
+            'description'=>'This is a seeded demo project',
+            'visibility'=>'public'
+        ]);
+
+        // Tasks
+        $t1 = Task::create(['project_id'=>$p->id,'assigned_to'=>$u2->id,'title'=>'Design UI','description'=>'Design the main UI','status'=>'todo']);
+        $t2 = Task::create(['project_id'=>$p->id,'assigned_to'=>$u3->id,'title'=>'API Endpoints','description'=>'Create APIs','status'=>'inprogress']);
+
+        // Comments
+        Comment::create(['user_id'=>$u2->id,'project_id'=>$p->id,'content'=>'Looks good!']);
+        Comment::create(['user_id'=>$u3->id,'task_id'=>$t2->id,'content'=>'Working on auth']);
+
+        // Activity logs
+        ActivityLog::create(['user_id'=>$user->id,'action'=>'Seeded demo project','data'=>['project_id'=>$p->id]]);
+        ActivityLog::create(['user_id'=>$u2->id,'action'=>'Seeded comment','data'=>['comment'=>'Looks good!']]);
+    }
+}
+
+
+9 — README (create README.md at project root)
+# Laravel PMS Mini
+
+Simple Project Management System (PMS) — Laravel 10+.
+
+## Quick Setup
+
+1. Clone:
+
+git clone <repo>
+ cd pms
+
+2. Install:
+
+composer install
+ npm install
+
+3. Env:
+
+cp .env.example .env
+ php artisan key:generate
+ // set DB_* in .env
+
+4. Migrate & seed:
+
+php artisan migrate --seed
+
+5. Serve:
+
+php artisan serve
+
+Login with seeded user:
+- Email: `demo@pms.test`
+- Password: `password`
+
+## Git
+
+git init
+ git add .
+ git commit -m "Initial PMS"
+ git remote add origin https://github.com/YOUR_USERNAME/pms.git
+ git branch -M main
+ git push -u origin main
+
+10 — Setup & Run (commands)
+Run these commands in your project root:
+# 1. create project (if you haven't)
+composer create-project laravel/laravel pms
+cd pms
+
+# 2. add files above into the correct folders...
+
+# 3. autoload helper
+# add "app/Helpers/activity.php" to composer.json autoload.files then:
+composer dump-autoload
+
+# 4. install node deps (optional; this project uses only jQuery from CDN)
+npm install
+
+# 5. migrate & seed
+php artisan migrate --seed
+
+# 6. serve
+php artisan serve
+# visit http://127.0.0.1:8000
+
+Seeded credentials:
+demo@pms.test / password
+
+
+
+11 — GitHub Upload
+git init
+git add .
+git commit -m "Initial PMS project"
+# create repo on GitHub and then:
+git remote add origin https://github.com/YOUR_USERNAME/pms-laravel-mini.git
+git branch -M main
+git push -u origin main
+
+
